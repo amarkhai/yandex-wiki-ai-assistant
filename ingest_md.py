@@ -8,7 +8,10 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim, lightweight
+DEFAULT_EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384-dim, lightweight (EN-centric)
+# Recommended for RU/Multilingual:
+#   - "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (384-dim)
+#   - "intfloat/multilingual-e5-base" (768-dim) — strong, but changes dim
 
 
 def read_markdown_files(docs_dir: Path, glob_pattern: str):
@@ -23,12 +26,10 @@ def read_markdown_files(docs_dir: Path, glob_pattern: str):
 
 
 def simple_md_clean(text: str) -> str:
-    """Very light cleanup: strip extra spaces. Keep code fences; they can be useful context."""
     return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
 def chunk_text(text: str, chunk_size: int = 900, chunk_overlap: int = 120):
-    """Character-based chunking (robust, no tokenizer dependency)."""
     text = text.strip()
     if not text:
         return []
@@ -47,8 +48,7 @@ def chunk_text(text: str, chunk_size: int = 900, chunk_overlap: int = 120):
 
 def build_index(vectors: np.ndarray):
     d = vectors.shape[1]
-    index = faiss.IndexFlatIP(d)  # cosine-like if we L2-normalize
-    # Normalize to unit length for cosine similarity via inner product
+    index = faiss.IndexFlatIP(d)
     faiss.normalize_L2(vectors)
     index.add(vectors)
     return index
@@ -66,14 +66,13 @@ def main():
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load embedder
     print(f"[INFO] Loading embed model: {args.embed_model}")
     embedder = SentenceTransformer(args.embed_model)
 
-    metadata = []  # list of dicts with {id, doc_path, chunk_id, text}
+    metadata = []
     all_chunks = []
 
-    print("[INFO] Scanning markdown files...")
+    print("[INFO] Scanning markdown files…")
     for path, raw in tqdm(list(read_markdown_files(args.docs_dir, args.glob_pattern))):
         cleaned = simple_md_clean(raw)
         chunks = chunk_text(cleaned, chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap)
@@ -90,25 +89,22 @@ def main():
     if not all_chunks:
         raise SystemExit("No markdown chunks found. Check your --docs_dir and --glob pattern.")
 
-    print(f"[INFO] Embedding {len(all_chunks)} chunks...")
+    print(f"[INFO] Embedding {len(all_chunks)} chunks…")
     embeddings = embedder.encode(all_chunks, batch_size=64, show_progress_bar=True, convert_to_numpy=True, normalize_embeddings=True)
 
-    print("[INFO] Building FAISS index...")
-    index = build_index(embeddings.copy())  # normalized already, but copy for safety
+    print("[INFO] Building FAISS index…")
+    index = build_index(embeddings.copy())
 
-    # Save FAISS index
     index_path = args.out_dir / "index.faiss"
     faiss.write_index(index, str(index_path))
 
-    # Save metadata jsonl
     meta_path = args.out_dir / "meta.jsonl"
     with meta_path.open("w", encoding="utf-8") as f:
         for m in metadata:
             f.write(json.dumps(m, ensure_ascii=False) + "\n")
 
-    # Save manifest
     manifest = {
-        "embedding_model": args.embed_model,
+        "embedding_model": args.embed_model,  # read by app.py to match query embedder
         "num_vectors": len(all_chunks),
         "chunk_size": args.chunk_size,
         "chunk_overlap": args.chunk_overlap,
@@ -116,7 +112,7 @@ def main():
     }
     (args.out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-    print(f"[OK] Wrote {index_path} and {meta_path}. Vectors: {len(all_chunks)}")
+    print(f"[OK] Wrote {index_path} and {meta_path}. Vectors: {len(all_chunks)}. Dim: {embeddings.shape[1]}")
 
 
 if __name__ == "__main__":

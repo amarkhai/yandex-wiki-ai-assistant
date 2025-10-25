@@ -10,10 +10,11 @@ import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# Try to force stdin/stdout to UTF-8 to avoid surrogate issues from the terminal
+# --- I/O encoding guards -----------------------------------------------------
+# Try to force stdin/stdout to UTF-8 and ignore invalid bytes from the terminal
 try:
-    sys.stdin.reconfigure(encoding="utf-8")
-    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdin.reconfigure(encoding="utf-8", errors="ignore")
+    sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
 except Exception:
     pass
 
@@ -22,14 +23,27 @@ INDEX_PATH = VECTOR_DIR / "index.faiss"
 META_PATH = VECTOR_DIR / "meta.jsonl"
 MANIFEST_PATH = VECTOR_DIR / "manifest.json"
 
+# Response language (default Russian as requested)
+RAG_RESPONSE_LANG = os.getenv("RAG_RESPONSE_LANG", "ru").lower()
+
 # —— Text hygiene ——
 
 def scrub(text: str) -> str:
-    """Remove surrogate code points / invalid bytes that can break JSON encoders.
-    Keeps everything else as UTF-8. """
     if text is None:
         return ""
     return text.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
+
+
+def safe_input(prompt: str) -> str:
+    """Robust input that survives bad terminal encodings."""
+    try:
+        return input(prompt)
+    except UnicodeDecodeError:
+        # Fallback: read raw bytes and decode leniently
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        data = sys.stdin.buffer.readline()
+        return data.decode("utf-8", errors="ignore")
 
 # —— Retrieval helpers ——
 
@@ -73,14 +87,7 @@ _embedder_cache = None
 
 
 def get_query_embedder(manifest: dict):
-    """Return a callable(text)->np.ndarray that matches the ingest embedding.
-    If manifest["embedding_model"] looks like a sentence-transformers id, use it.
-    If it looks like "openai:<model>", use OpenAI with that model.
-    As a last resort, fall back to ST default, then OpenAI small.
-    """
     embed_id = manifest.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
-
-    # Env override: RAG_QUERY_EMBEDDER = "st" or "openai"
     override = os.getenv("RAG_QUERY_EMBEDDER", "").lower().strip()
 
     def st_embedder_factory(model_name: str):
@@ -100,7 +107,6 @@ def get_query_embedder(manifest: dict):
             return np.array(emb.data[0].embedding, dtype="float32")
         return _f
 
-    # Prefer symmetry with ingest unless overridden
     if override == "st" and _has_st:
         return st_embedder_factory(embed_id if embed_id.startswith("sentence-transformers/") else "sentence-transformers/all-MiniLM-L6-v2")
     if override == "openai" and os.getenv("OPENAI_API_KEY"):
@@ -112,7 +118,6 @@ def get_query_embedder(manifest: dict):
     if embed_id.startswith("openai:") and os.getenv("OPENAI_API_KEY"):
         return openai_embedder_factory(embed_id.split(":", 1)[1])
 
-    # Fallbacks
     if _has_st:
         return st_embedder_factory("sentence-transformers/all-MiniLM-L6-v2")
     if os.getenv("OPENAI_API_KEY"):
@@ -129,22 +134,27 @@ def call_llm(question: str, context_blocks: List[str]) -> str:
     context_blocks = [scrub(c) for c in context_blocks]
 
     if not os.getenv("OPENAI_API_KEY"):
-        # Offline/dev-friendly fallback: a rules-based response
-        joined = "\n\n".join(context_blocks) if context_blocks else "(no relevant context)"
-        return f"[DEV MODE]\nQuestion: {question}\n\nContext:\n{joined}\n\nAnswer (mock): This is a placeholder answer. Configure OPENAI_API_KEY for real responses."
+        joined = "\n\n".join(context_blocks) if context_blocks else "(контекст не найден)"
+        return f"[DEV MODE / RU]\nВопрос: {question}\n\nКонтекст:\n{joined}\n\nОтвет (заглушка): Установите OPENAI_API_KEY для реальных ответов."
 
     client = OpenAI()
     system = (
-        "You are a helpful documentation assistant. "
-        "Use the provided CONTEXT snippets to answer precisely. "
-        "If the answer is not in context, say so and suggest where it might be. "
-        "Cite sources as (source: filename.md#chunk)."
+        "Ты — полезный ассистент по документации. Отвечай на РУССКОМ ЯЗЫКЕ. "
+        "Опирайся только на переданные CONTEXT-фрагменты; если ответа нет в контексте, так и скажи и предложи, где его искать. "
+        "Добавляй краткие ссылки на источники в формате (source: filename.md#chunk)."
     )
+    if RAG_RESPONSE_LANG.startswith("ru"):
+        user_prefix = "Вопрос"
+        ctx_label = "КОНТЕКСТ"
+    else:
+        user_prefix = "Question"
+        ctx_label = "CONTEXT"
+
     context_text = "\n\n".join(context_blocks)
 
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": f"Question: {question}\n\nCONTEXT:\n{context_text}"},
+        {"role": "user", "content": f"{user_prefix}: {question}\n\n{ctx_label}:\n{context_text}"},
     ]
 
     resp = client.chat.completions.create(model=model, messages=messages, temperature=0.2)
@@ -158,7 +168,6 @@ def format_citations(hits: List[Tuple[float, dict]]) -> List[str]:
     for score, m in hits:
         path = Path(m["doc_path"])  # absolute path saved in ingest
         cites.append(f"{path.name}#chunk{m['chunk_id']} (score={score:.3f})")
-    # Deduplicate while preserving order
     seen = set()
     uniq = []
     for c in cites:
@@ -171,44 +180,36 @@ def format_citations(hits: List[Tuple[float, dict]]) -> List[str]:
 def main():
     load_dotenv()
     index, meta, manifest = load_index_and_meta()
-
-    # Build a query embedder that matches the ingest embedding model
     embedder = get_query_embedder(manifest)
 
-    print("\n🔍 Markdown RAG Agent — type your question (or 'exit')\n")
+    print("\n🔍 Markdown RAG Agent — введите вопрос (или 'exit')\n")
     while True:
         try:
-            q = input("You: ").strip()
+            q = safe_input("Вы: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nBye!")
+            print("\nПока!")
             break
         if not q:
             continue
-        if q.lower() in {"exit", "quit", ":q"}:
-            print("Bye!")
+        if q.lower() in {"exit", "quit", ":q", "выход"}:
+            print("Пока!")
             break
 
         q = scrub(q)
         qvec = embedder(q)
 
-        # If dimension somehow mismatches, try a last-resort fallback to ST default
         if qvec.shape[0] != index.d:
-            print(f"[WARN] Query dim {qvec.shape[0]} != index dim {index.d}. Trying fallback ST model…")
-            if _has_st:
-                from sentence_transformers import SentenceTransformer
-                st = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-                qvec = st.encode([q], convert_to_numpy=True, normalize_embeddings=True)[0].astype("float32")
-            if qvec.shape[0] != index.d:
-                raise SystemExit(f"Embedding dimension still mismatched: {qvec.shape[0]} vs {index.d}. Re-ingest with matching model or adjust RAG_QUERY_EMBEDDER.")
+            print(f"[WARN] Размерность запроса {qvec.shape[0]} != размерности индекса {index.d}. Переиндексируйте или задайте RAG_QUERY_EMBEDDER.")
+            continue
 
         hits = search(index, meta, qvec, k=6)
         blocks = [h[1]["text"] for h in hits]
         citations = format_citations(hits)
 
         answer = call_llm(q, blocks)
-        print("\nAssistant:\n" + answer + "\n")
+        print("\nАссистент:\n" + answer + "\n")
         if citations:
-            print("Sources:")
+            print("Источники:")
             for c in citations:
                 print(" - ", c)
         print()

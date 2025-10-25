@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List, Tuple
 
@@ -9,9 +10,26 @@ import numpy as np
 from dotenv import load_dotenv
 from openai import OpenAI
 
+# Try to force stdin/stdout to UTF-8 to avoid surrogate issues from the terminal
+try:
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 VECTOR_DIR = Path(os.getenv("VECTOR_DIR", "vector_store"))
 INDEX_PATH = VECTOR_DIR / "index.faiss"
 META_PATH = VECTOR_DIR / "meta.jsonl"
+
+# —— Text hygiene ——
+
+def scrub(text: str) -> str:
+    """Remove surrogate code points / invalid bytes that can break JSON encoders.
+    Keeps everything else as UTF-8. """
+    if text is None:
+        return ""
+    # Round-trip through bytes, dropping invalids
+    return text.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
 
 # —— Retrieval helpers ——
 
@@ -40,10 +58,6 @@ def search(index, meta, query_vector: np.ndarray, k: int = 5) -> List[Tuple[floa
 
 
 # —— Simple embedding with OpenAI (optional) or a local fallback ——
-# To keep ingest/app symmetrical, we recommend using OpenAI for query embeddings
-# *or* the same SentenceTransformer used during ingest. Here we'll do OpenAI
-# (more semantic power) and fall back to a tiny local vectorizer if no key.
-
 try:
     from sentence_transformers import SentenceTransformer
     _has_st = True
@@ -53,16 +67,16 @@ except Exception:
 _embedder_cache = None
 
 def embed_query(text: str) -> np.ndarray:
-    global _embedder_cache
+    text = scrub(text)
     # Prefer OpenAI embedding if key exists
     if os.getenv("OPENAI_API_KEY"):
         client = OpenAI()
-        # Use a modern, small embedding model
         emb = client.embeddings.create(model="text-embedding-3-small", input=text)
         vec = np.array(emb.data[0].embedding, dtype="float32")
         return vec
     # Fallback to local ST model (same as ingest default)
     if _has_st:
+        global _embedder_cache
         if _embedder_cache is None:
             _embedder_cache = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
         vec = _embedder_cache.encode([text], convert_to_numpy=True, normalize_embeddings=True)[0]
@@ -75,6 +89,9 @@ def embed_query(text: str) -> np.ndarray:
 def call_llm(question: str, context_blocks: List[str]) -> str:
     load_dotenv()
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    question = scrub(question)
+    context_blocks = [scrub(c) for c in context_blocks]
+
     if not os.getenv("OPENAI_API_KEY"):
         # Offline/dev-friendly fallback: a rules-based response
         joined = "\n\n".join(context_blocks) if context_blocks else "(no relevant context)"
@@ -132,6 +149,7 @@ def main():
             print("Bye!")
             break
 
+        q = scrub(q)
         qvec = embed_query(q)
         hits = search(index, meta, qvec, k=6)
         blocks = [h[1]["text"] for h in hits]

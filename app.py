@@ -20,6 +20,7 @@ except Exception:
 VECTOR_DIR = Path(os.getenv("VECTOR_DIR", "vector_store"))
 INDEX_PATH = VECTOR_DIR / "index.faiss"
 META_PATH = VECTOR_DIR / "meta.jsonl"
+MANIFEST_PATH = VECTOR_DIR / "manifest.json"
 
 # —— Text hygiene ——
 
@@ -28,7 +29,6 @@ def scrub(text: str) -> str:
     Keeps everything else as UTF-8. """
     if text is None:
         return ""
-    # Round-trip through bytes, dropping invalids
     return text.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
 
 # —— Retrieval helpers ——
@@ -41,11 +41,16 @@ def load_index_and_meta():
     with META_PATH.open("r", encoding="utf-8") as f:
         for line in f:
             meta.append(json.loads(line))
-    return index, meta
+    manifest = {}
+    if MANIFEST_PATH.exists():
+        try:
+            manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+    return index, meta, manifest
 
 
 def search(index, meta, query_vector: np.ndarray, k: int = 5) -> List[Tuple[float, dict]]:
-    # Make sure query is 2D float32
     q = query_vector.astype("float32")[None, :]
     faiss.normalize_L2(q)
     scores, ids = index.search(q, k)
@@ -57,7 +62,7 @@ def search(index, meta, query_vector: np.ndarray, k: int = 5) -> List[Tuple[floa
     return out
 
 
-# —— Simple embedding with OpenAI (optional) or a local fallback ——
+# —— Embedding selection (symmetry with ingest) ——
 try:
     from sentence_transformers import SentenceTransformer
     _has_st = True
@@ -66,21 +71,52 @@ except Exception:
 
 _embedder_cache = None
 
-def embed_query(text: str) -> np.ndarray:
-    text = scrub(text)
-    # Prefer OpenAI embedding if key exists
-    if os.getenv("OPENAI_API_KEY"):
-        client = OpenAI()
-        emb = client.embeddings.create(model="text-embedding-3-small", input=text)
-        vec = np.array(emb.data[0].embedding, dtype="float32")
-        return vec
-    # Fallback to local ST model (same as ingest default)
+
+def get_query_embedder(manifest: dict):
+    """Return a callable(text)->np.ndarray that matches the ingest embedding.
+    If manifest["embedding_model"] looks like a sentence-transformers id, use it.
+    If it looks like "openai:<model>", use OpenAI with that model.
+    As a last resort, fall back to ST default, then OpenAI small.
+    """
+    embed_id = manifest.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
+
+    # Env override: RAG_QUERY_EMBEDDER = "st" or "openai"
+    override = os.getenv("RAG_QUERY_EMBEDDER", "").lower().strip()
+
+    def st_embedder_factory(model_name: str):
+        def _f(text: str) -> np.ndarray:
+            nonlocal model_name
+            global _embedder_cache
+            if _embedder_cache is None:
+                _embedder_cache = SentenceTransformer(model_name)
+            vec = _embedder_cache.encode([text], convert_to_numpy=True, normalize_embeddings=True)[0]
+            return vec.astype("float32")
+        return _f
+
+    def openai_embedder_factory(model_name: str):
+        def _f(text: str) -> np.ndarray:
+            client = OpenAI()
+            emb = client.embeddings.create(model=model_name, input=text)
+            return np.array(emb.data[0].embedding, dtype="float32")
+        return _f
+
+    # Prefer symmetry with ingest unless overridden
+    if override == "st" and _has_st:
+        return st_embedder_factory(embed_id if embed_id.startswith("sentence-transformers/") else "sentence-transformers/all-MiniLM-L6-v2")
+    if override == "openai" and os.getenv("OPENAI_API_KEY"):
+        model_name = embed_id.split(":", 1)[1] if embed_id.startswith("openai:") else "text-embedding-3-small"
+        return openai_embedder_factory(model_name)
+
+    if embed_id.startswith("sentence-transformers/") and _has_st:
+        return st_embedder_factory(embed_id)
+    if embed_id.startswith("openai:") and os.getenv("OPENAI_API_KEY"):
+        return openai_embedder_factory(embed_id.split(":", 1)[1])
+
+    # Fallbacks
     if _has_st:
-        global _embedder_cache
-        if _embedder_cache is None:
-            _embedder_cache = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-        vec = _embedder_cache.encode([text], convert_to_numpy=True, normalize_embeddings=True)[0]
-        return vec.astype("float32")
+        return st_embedder_factory("sentence-transformers/all-MiniLM-L6-v2")
+    if os.getenv("OPENAI_API_KEY"):
+        return openai_embedder_factory("text-embedding-3-small")
     raise RuntimeError("No embedding available. Set OPENAI_API_KEY or install sentence-transformers.")
 
 
@@ -134,7 +170,10 @@ def format_citations(hits: List[Tuple[float, dict]]) -> List[str]:
 
 def main():
     load_dotenv()
-    index, meta = load_index_and_meta()
+    index, meta, manifest = load_index_and_meta()
+
+    # Build a query embedder that matches the ingest embedding model
+    embedder = get_query_embedder(manifest)
 
     print("\n🔍 Markdown RAG Agent — type your question (or 'exit')\n")
     while True:
@@ -150,7 +189,18 @@ def main():
             break
 
         q = scrub(q)
-        qvec = embed_query(q)
+        qvec = embedder(q)
+
+        # If dimension somehow mismatches, try a last-resort fallback to ST default
+        if qvec.shape[0] != index.d:
+            print(f"[WARN] Query dim {qvec.shape[0]} != index dim {index.d}. Trying fallback ST model…")
+            if _has_st:
+                from sentence_transformers import SentenceTransformer
+                st = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+                qvec = st.encode([q], convert_to_numpy=True, normalize_embeddings=True)[0].astype("float32")
+            if qvec.shape[0] != index.d:
+                raise SystemExit(f"Embedding dimension still mismatched: {qvec.shape[0]} vs {index.d}. Re-ingest with matching model or adjust RAG_QUERY_EMBEDDER.")
+
         hits = search(index, meta, qvec, k=6)
         blocks = [h[1]["text"] for h in hits]
         citations = format_citations(hits)

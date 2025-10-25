@@ -1,0 +1,4 @@
+gramax.config.yaml
+/var/
+!/var/.gitkeep
+.env

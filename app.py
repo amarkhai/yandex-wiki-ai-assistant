@@ -174,8 +174,8 @@ def format_citations(hits: List[Tuple[float, dict]]) -> List[str]:
         if raw_path.startswith(cwd):
             raw_path = raw_path[len(cwd):]
 
-        # 2. Удаляем префикс /var/export/out/yandex-wiki-catalog
-        raw_path = raw_path.replace("/var/export/out/yandex-wiki-catalog", "")
+        # 2. Удаляем префикс /var/out/yandex-wiki-catalog
+        raw_path = raw_path.replace("/var/out/yandex-wiki-catalog", "")
 
         # 3. Удаляем расширение .md
         if raw_path.endswith(".md"):

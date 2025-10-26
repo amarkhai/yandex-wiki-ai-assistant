@@ -1,0 +1,7 @@
+import:
+  yandex:
+    headers:
+      "x-csrf-token": "your-csrf-token"
+      "x-org-id": "your-org-id"
+      cookie: "your-cookie-string"
+      "x-collab-org-id": "optional-collab-org-id"

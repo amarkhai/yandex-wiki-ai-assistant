@@ -38,7 +38,7 @@ import:
 Откройте консоль и выполните команду:
 
 ```shell
-npx gramax-cli import yandex-wiki --destination <path> --config <path> [--raw]
+npx gramax-cli import yandex-wiki --destination ./var --config . --raw
 ```
 Где:
 

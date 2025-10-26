@@ -60,7 +60,7 @@ npx gramax-cli import yandex-wiki --destination ./var --config . --raw
 #### 2. Создаем и заполняем БД
 
    ```bash
-   python ingest_md.py --docs_dir var/export --out_dir vector_store
+   python ingest_md.py --docs_dir var/out --out_dir vector_store
    ```
 
    Common options:

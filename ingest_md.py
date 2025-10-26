@@ -8,11 +8,10 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-DEFAULT_EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # 384-dim, lightweight (EN-centric)
+DEFAULT_EMBED_MODEL = "intfloat/multilingual-e5-base"
 # Recommended for RU/Multilingual:
-#   - "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (384-dim)
-#   - "intfloat/multilingual-e5-base" (768-dim) — strong, but changes dim
-
+#   - "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (384-dim, lightweight (EN-centric))
+#   - "intfloat/multilingual-e5-base" (768-dim) — strong, but not lightweight
 
 def read_markdown_files(docs_dir: Path, glob_pattern: str):
     paths = sorted(docs_dir.glob(glob_pattern))

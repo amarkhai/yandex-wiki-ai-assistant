@@ -85,18 +85,28 @@ except Exception:
 
 _embedder_cache = None
 
-
 def get_query_embedder(manifest: dict):
+    """
+    Возвращает callable(text)->np.ndarray, совместимый с моделью инжеста.
+    Приоритет:
+      1) RAG_EMBED_MODEL_OVERRIDE (точное имя HF или 'openai:<model>')
+      2) manifest['embedding_model']
+      3) дефолты
+    """
     embed_id = manifest.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
-    override = os.getenv("RAG_QUERY_EMBEDDER", "").lower().strip()
+    override_name = os.getenv("RAG_EMBED_MODEL_OVERRIDE", "").strip() or embed_id
+    override_mode = os.getenv("RAG_QUERY_EMBEDDER", "").lower().strip()  # 'st' | 'openai'
 
     def st_embedder_factory(model_name: str):
         def _f(text: str) -> np.ndarray:
             nonlocal model_name
             global _embedder_cache
             if _embedder_cache is None:
+                from sentence_transformers import SentenceTransformer
                 _embedder_cache = SentenceTransformer(model_name)
-            vec = _embedder_cache.encode([text], convert_to_numpy=True, normalize_embeddings=True)[0]
+            # e5-модели рекомендуют префиксы
+            qtext = f"query: {text}" if "e5" in model_name.lower() else text
+            vec = _embedder_cache.encode([qtext], convert_to_numpy=True, normalize_embeddings=True)[0]
             return vec.astype("float32")
         return _f
 
@@ -107,23 +117,19 @@ def get_query_embedder(manifest: dict):
             return np.array(emb.data[0].embedding, dtype="float32")
         return _f
 
-    if override == "st" and _has_st:
-        return st_embedder_factory(embed_id if embed_id.startswith("sentence-transformers/") else "sentence-transformers/all-MiniLM-L6-v2")
-    if override == "openai" and os.getenv("OPENAI_API_KEY"):
-        model_name = embed_id.split(":", 1)[1] if embed_id.startswith("openai:") else "text-embedding-3-small"
+    # Явный оверрайд режимом
+    if override_mode == "openai" and os.getenv("OPENAI_API_KEY"):
+        model_name = override_name.split(":", 1)[1] if override_name.startswith("openai:") else "text-embedding-3-small"
         return openai_embedder_factory(model_name)
+    if override_mode == "st":
+        return st_embedder_factory(override_name)
 
-    if embed_id.startswith("sentence-transformers/") and _has_st:
-        return st_embedder_factory(embed_id)
-    if embed_id.startswith("openai:") and os.getenv("OPENAI_API_KEY"):
-        return openai_embedder_factory(embed_id.split(":", 1)[1])
+    # Авто-распознавание по имени
+    if override_name.startswith("openai:") and os.getenv("OPENAI_API_KEY"):
+        return openai_embedder_factory(override_name.split(":", 1)[1])
 
-    if _has_st:
-        return st_embedder_factory("sentence-transformers/all-MiniLM-L6-v2")
-    if os.getenv("OPENAI_API_KEY"):
-        return openai_embedder_factory("text-embedding-3-small")
-    raise RuntimeError("No embedding available. Set OPENAI_API_KEY or install sentence-transformers.")
-
+    # По умолчанию — SentenceTransformers для любого HF id
+    return st_embedder_factory(override_name)
 
 # —— LLM call ——
 

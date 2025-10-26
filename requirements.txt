@@ -6,3 +6,4 @@ sentence-transformers==2.7.0
 openai>=1.40.0
 python-dotenv>=1.0.1
 tqdm>=4.66.4
+streamlit==1.50.0

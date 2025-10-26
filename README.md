@@ -78,9 +78,15 @@ npx gramax-cli import yandex-wiki --destination ./var --config . --raw
    *  `cp .env.example .env` и меняем `OPENAI_API_KEY`.
    * Можно опционально поменять модель `OPENAI_MODEL` (по умолчанию `gpt-4o-mini`).
 
-#### 2. Запуск агента
+#### 2. Запуск агента в консоле
 
    ```bash
    python app.py
+   ```
+
+#### 3. Запуск web интерфейса
+
+   ```bash
+   ./.venv/bin/streamlit run streamlit_app.py
    ```
 ---

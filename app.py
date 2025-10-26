@@ -161,13 +161,38 @@ def call_llm(question: str, context_blocks: List[str]) -> str:
     return resp.choices[0].message.content.strip()
 
 
-# —— Pretty formatting ——
 
+## Modified format_citations to generate wiki links
 def format_citations(hits: List[Tuple[float, dict]]) -> List[str]:
+    """Формирует список ссылок на wiki.yandex.ru из путей doc_path."""
     cites = []
+    cwd = os.getcwd()
     for score, m in hits:
-        path = Path(m["doc_path"])  # absolute path saved in ingest
-        cites.append(f"{path.name}#chunk{m['chunk_id']} (score={score:.3f})")
+        raw_path = Path(m["doc_path"]).as_posix()
+
+        # 1. Удаляем текущую директорию
+        if raw_path.startswith(cwd):
+            raw_path = raw_path[len(cwd):]
+
+        # 2. Удаляем префикс /var/export/out/yandex-wiki-catalog
+        raw_path = raw_path.replace("/var/export/out/yandex-wiki-catalog", "")
+
+        # 3. Удаляем расширение .md
+        if raw_path.endswith(".md"):
+            raw_path = raw_path[:-3]
+
+        # 4. Удаляем _index, если это финальный элемент пути
+        raw_path = raw_path.replace("/_index", "")
+
+        # 5. Удаляем ведущие слэши
+        raw_path = raw_path.lstrip("/")
+
+        # 6. Склеиваем базовый URL
+        wiki_url = f"https://wiki.yandex.ru/{raw_path}"
+
+        cites.append(f"[{wiki_url}]( {wiki_url} ) (score={score:.3f})")
+
+    # Убираем дубликаты, сохраняя порядок
     seen = set()
     uniq = []
     for c in cites:
@@ -175,7 +200,6 @@ def format_citations(hits: List[Tuple[float, dict]]) -> List[str]:
             seen.add(c)
             uniq.append(c)
     return uniq
-
 
 def main():
     load_dotenv()
